@@ -11,6 +11,14 @@ defmodule UnoGame.Application do
       UnoGameWeb.Telemetry,
       {DNSCluster, query: Application.get_env(:uno_game, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: UnoGame.PubSub},
+      UnoGameWeb.Presence,
+
+      # Starting a registry for the room genservers
+      {Registry, keys: :unique, name: UnoGame.RoomRegistry},
+
+      # starting a dynamic supervisor for room genservers
+      {DynamicSupervisor, strategy: :one_for_one, name: UnoGame.RoomSupervisor},
+
       # Start a worker by calling: UnoGame.Worker.start_link(arg)
       # {UnoGame.Worker, arg},
       # Start to serve requests, typically the last entry
