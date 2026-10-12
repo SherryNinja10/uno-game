@@ -28,6 +28,10 @@ defmodule UnoGame.RoomServer do
     GenServer.call(via_tuple(room_id), {:join_room, session_token, username})
   end
 
+  def leave_room(room_id, session_token) do
+    GenServer.call(via_tuple(room_id), {:leave_room, session_token})
+  end
+
   def start_game(room_id, host_session_token) do
     GenServer.call(via_tuple(room_id), {:start_game, host_session_token})
   end
@@ -38,6 +42,10 @@ defmodule UnoGame.RoomServer do
 
   def draw_card(room_id, session_token) do
     GenServer.cast(via_tuple(room_id), {:draw_card, session_token})
+  end
+
+  def get_state(room_id) do
+    GenServer.call(via_tuple(room_id), :get_state)
   end
 
   # Internal helper functions (defp)
@@ -94,6 +102,27 @@ defmodule UnoGame.RoomServer do
     end
   end
 
+  def handle_call({:leave_room, session_token}, _from, room_state) do
+    # Remove the player from the map
+    updated_players = Map.delete(room_state.players, session_token)
+
+    # Reassign host if the leaving player was the current host
+    new_host =
+      if room_state.host == session_token do
+        case Map.keys(updated_players) do
+          [] -> nil # Room is empty
+          [next_host_token | _] -> next_host_token # Pick the first available remaining token
+        end
+      else
+        room_state.host
+      end
+
+    new_state = %{room_state | players: updated_players, host: new_host}
+    broadcast_state(new_state)
+
+    {:reply, :ok, new_state}
+  end
+
   def handle_call({:start_game, host_session_token}, _from, room_state) do
     # Logic to follow
     {:reply, :ok, room_state}
@@ -107,6 +136,10 @@ defmodule UnoGame.RoomServer do
   def handle_cast({:draw_card, session_token}, room_state) do
     # Logic to follow
     {:noreply, room_state}
+  end
+
+  def handle_call(:get_state, _from, room_state) do
+    {:reply, room_state, room_state}
   end
 
   def handle_info(:turn_timeout, room_state) do
