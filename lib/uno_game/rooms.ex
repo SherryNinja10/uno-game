@@ -4,11 +4,11 @@ defmodule UnoGame.Rooms do
   alias UnoGame.RoomServer
   alias UnoGame.RoomSupersivor
 
-  def create_room(room_id) do
+  def create_room do
     room_id = generate_nano_id()
 
     # Spawns the process dynamically so it is monitored by your supervisor
-    case DynamicSupervisor.start_child(RoomSupervisor, {RoomServer, room_id}) do
+    case DynamicSupervisor.start_child(UnoGame.RoomSupervisor, {UnoGame.RoomServer, room_id}) do
       {:ok, _pid} ->
         {:ok, room_id}
 

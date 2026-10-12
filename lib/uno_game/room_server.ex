@@ -56,6 +56,11 @@ defmodule UnoGame.RoomServer do
   defp broadcast_state(room_state) do
     # Logic to follow
     # e.g., Phoenix.PubSub.broadcast(UnoGame.PubSub, "room:#{room_state.room_id}", {:state_update, room_state})
+    Phoenix.PubSub.broadcast(
+      UnoGame.PubSub,
+      "room:#{room_state.room_id}",
+      {:state_update, room_state}
+    )
   end
 
   defp project_for_player(room_state, session_token) do

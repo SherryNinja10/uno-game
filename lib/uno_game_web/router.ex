@@ -17,7 +17,8 @@ defmodule UnoGameWeb.Router do
   scope "/", UnoGameWeb do
     pipe_through :browser
 
-    live "/", HomeLive, :home
+    live "/", HomeLive, :index
+    live "/room/:id", RoomLive, :index
   end
 
   # Other scopes may use custom stacks.
