@@ -8,7 +8,8 @@ defmodule UnoGameWeb.Endpoint do
     store: :cookie,
     key: "_uno_game_key",
     signing_salt: "ZFsVdjCz",
-    same_site: "Lax"
+    same_site: "Lax",
+    max_age: 60 * 60 * 24 * 7 # Persists for 7 days
   ]
 
   socket "/live", Phoenix.LiveView.Socket,

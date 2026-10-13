@@ -7,15 +7,20 @@ defmodule UnoGameWeb.HomeLive do
     # Assign a session token. In a production app, this should be generated
     # via a Plug in the router and passed in through the session map to ensure
     # it persists securely in an HTTP-only cookie to prevent session hijacking.
-    session_token = Map.get(session, "session_token") || :crypto.strong_rand_bytes(16) |> Base.encode16()
+    session_token = Map.get(session, "session_token")
 
-    socket =
-      socket
-      |> assign(:session_token, session_token)
-      |> assign(:username, "")
-      |> assign(:error, nil)
+    # If the user is already in an active room, bypass the home page entirely
+    if room_id = Rooms.find_room_by_token(session_token) do
+      {:ok, push_navigate(socket, to: "/room/#{room_id}")}
+    else
+      socket =
+        socket
+        |> assign(:session_token, session_token)
+        |> assign(:username, "")
+        |> assign(:error, nil)
 
-    {:ok, socket}
+      {:ok, socket}
+    end
   end
 
   def render(assigns) do
@@ -95,14 +100,18 @@ defmodule UnoGameWeb.HomeLive do
   end
 
   def handle_event("join_room", %{"room_id" => room_id}, socket) do
-    # Assuming they must type their username in the first box before joining
     username = socket.assigns.username
+    formatted_id = String.trim(room_id)
 
-    if String.trim(username) == "" do
-      {:noreply, assign(socket, :error, "Please enter a username above before joining.")}
-    else
-      formatted_id = String.trim(room_id)
-      {:noreply, push_navigate(socket, to: "/room/#{formatted_id}?username=#{URI.encode(username)}&token=#{socket.assigns.session_token}")}
+    cond do
+      String.trim(username) == "" ->
+        {:noreply, assign(socket, :error, "Please enter a username above before joining.")}
+
+      not Rooms.room_exists?(formatted_id) ->
+        {:noreply, assign(socket, :error, "Room does not exist. Please check the code.")}
+
+      true ->
+        {:noreply, push_navigate(socket, to: "/room/#{formatted_id}")}
     end
   end
 

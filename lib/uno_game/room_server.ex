@@ -69,17 +69,27 @@ defmodule UnoGame.RoomServer do
 
   # Server Callbacks
   def init(room_id) do
+    # Subscribe to the presence topic to monitor active WebSockets
+    Phoenix.PubSub.subscribe(UnoGame.PubSub, "presence:room:#{room_id}")
+
     # Initialize the struct using the provided room_id and default values
     initial_state = %__MODULE__{room_id: room_id}
     {:ok, initial_state}
   end
 
   def handle_call({:join_room, session_token, username}, _from, room_state) do
+    # Cancel the garbage collection timer if someone joins/reconnects
+    if room_state.gc_timer_ref do
+      Process.cancel_timer(room_state.gc_timer_ref)
+    end
+
+    # Strip out the old ref so it is clean for next time
+    room_state = %{room_state | gc_timer_ref: nil}
+
     cond do
       # Case 1: Player is reconnecting
       Map.has_key?(room_state.players, session_token) ->
-        updated_players = put_in(room_state.players[session_token].connection_status, :connected)
-        new_state = %{room_state | players: updated_players}
+        new_state = put_in(room_state.players[session_token].connection_status, :connected)
         broadcast_state(new_state)
         {:reply, :ok, new_state}
 
@@ -111,21 +121,27 @@ defmodule UnoGame.RoomServer do
     # Remove the player from the map
     updated_players = Map.delete(room_state.players, session_token)
 
-    # Reassign host if the leaving player was the current host
-    new_host =
-      if room_state.host == session_token do
-        case Map.keys(updated_players) do
-          [] -> nil # Room is empty
-          [next_host_token | _] -> next_host_token # Pick the first available remaining token
+    if map_size(updated_players) == 0 do
+      # If the room is completely empty, terminate immediately without the 30s timer
+      new_state = %{room_state | players: updated_players, host: nil}
+      {:stop, :normal, :ok, new_state}
+    else
+      # Reassign host if the leaving player was the current host
+      new_host =
+        if room_state.host == session_token do
+          case Map.keys(updated_players) do
+            [next_host_token | _] -> next_host_token # Pick the first available remaining token
+            _ -> nil
+          end
+        else
+          room_state.host
         end
-      else
-        room_state.host
-      end
 
-    new_state = %{room_state | players: updated_players, host: new_host}
-    broadcast_state(new_state)
+      new_state = %{room_state | players: updated_players, host: new_host}
+      broadcast_state(new_state)
 
-    {:reply, :ok, new_state}
+      {:reply, :ok, new_state}
+    end
   end
 
   def handle_call({:start_game, host_session_token}, _from, room_state) do
@@ -152,13 +168,42 @@ defmodule UnoGame.RoomServer do
     {:noreply, room_state}
   end
 
+  def handle_info(%Phoenix.Socket.Broadcast{event: "presence_diff", payload: diff}, room_state) do
+    updated_players =
+      Enum.reduce(diff.leaves, room_state.players, fn {token, _meta}, acc ->
+        if Map.has_key?(acc, token) do
+          put_in(acc[token].connection_status, :disconnected)
+        else
+          acc
+        end
+      end)
+
+    # Check if every single player is currently disconnected
+    all_disconnected? = Enum.all?(updated_players, fn {_token, player} ->
+      player.connection_status == :disconnected
+    end)
+
+    # Start the 30-second countdown if empty and no timer currently exists
+    new_gc_ref =
+      if all_disconnected? and is_nil(room_state.gc_timer_ref) do
+        Process.send_after(self(), :execute_gc, 30_000)
+      else
+        room_state.gc_timer_ref
+      end
+
+    new_state = %{room_state | players: updated_players, gc_timer_ref: new_gc_ref}
+    broadcast_state(new_state)
+
+    {:noreply, new_state}
+  end
+
   def handle_info(:presence_empty, room_state) do
     # Logic to follow
     {:noreply, room_state}
   end
 
   def handle_info(:execute_gc, room_state) do
-    # Logic to follow
-    {:noreply, room_state}
+    # Returning :stop with :normal reason cleanly terminates the GenServer
+    {:stop, :normal, room_state}
   end
 end

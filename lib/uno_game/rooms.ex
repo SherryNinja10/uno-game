@@ -25,12 +25,40 @@ defmodule UnoGame.Rooms do
     RoomServer.get_state(room_id)
   end
 
+  @doc """
+  Checks if a room exists in the registry.
+  """
+  def room_exists?(room_id) do
+    case Registry.lookup(UnoGame.RoomRegistry, room_id) do
+      [{_pid, _value}] -> true
+      [] -> false
+    end
+  end
+
   def join_room(room_id, session_token, username) do
     RoomServer.join_room(room_id, session_token, username)
   end
 
   def leave_room(room_id, session_token) do
     RoomServer.leave_room(room_id, session_token)
+  end
+
+  @doc """
+  Searches all active rooms to find if a session token is currently playing.
+  Returns the room_id if found, or nil.
+  """
+  def find_room_by_token(session_token) do
+    # Extract all room_ids currently registered in the unique registry
+    room_ids = Registry.select(UnoGame.RoomRegistry, [{{:"$1", :_, :_}, [], [:"$1"]}])
+
+    Enum.find_value(room_ids, fn room_id ->
+      state = get_room_state(room_id)
+      if Map.has_key?(state.players, session_token) do
+        room_id
+      else
+        nil
+      end
+    end)
   end
 
   def start_game(room_id, host_session_token) do

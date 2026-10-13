@@ -8,6 +8,7 @@ defmodule UnoGameWeb.Router do
     plug :put_root_layout, html: {UnoGameWeb.Layouts, :root}
     plug :protect_from_forgery
     plug :put_secure_browser_headers
+    plug :ensure_session_token # Add this line
   end
 
   pipeline :api do
@@ -40,6 +41,15 @@ defmodule UnoGameWeb.Router do
 
       live_dashboard "/dashboard", metrics: UnoGameWeb.Telemetry
       forward "/mailbox", Plug.Swoosh.MailboxPreview
+    end
+  end
+
+  defp ensure_session_token(conn, _opts) do
+    if get_session(conn, :session_token) do
+      conn
+    else
+      token = :crypto.strong_rand_bytes(16) |> Base.encode16()
+      put_session(conn, :session_token, token)
     end
   end
 end

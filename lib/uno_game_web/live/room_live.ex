@@ -3,41 +3,48 @@ defmodule UnoGameWeb.RoomLive do
 
   alias UnoGame.Rooms
 
-  def mount(%{"id" => room_id, "username" => username, "token" => token}, _session, socket) do
-    if connected?(socket) do
-      # Attempt to join the room in the GenServer
-      case Rooms.join_room(room_id, token, username) do
-        :ok ->
-          # Subscribe to the room's PubSub topic for real-time state updates
-          Phoenix.PubSub.subscribe(UnoGame.PubSub, "room:#{room_id}")
+  def mount(%{"id" => room_id} = params, session, socket) do
+    # Securely extract the persistent token from the HTTP cookie session
+    token = Map.get(session, "session_token")
 
-          # Fetch the immediate state to render the initial UI
-          room_state = Rooms.get_room_state(room_id)
+    # If they came from the join form, the username is in params.
+    # If they are reconnecting, it will be nil here, but we will grab it from the GenServer.
+    username_param = params["username"]
 
-          socket =
-            socket
-            |> assign(:room_id, room_id)
-            |> assign(:session_token, token)
-            |> assign(:current_user, username)
-            |> assign(:room_state, room_state)
-
-          {:ok, socket}
-
-        {:error, :room_full} ->
-          {:ok,
-           socket
-           |> put_flash(:error, "Room is full.")
-           |> redirect(to: "/")}
-
-        {:error, _reason} ->
-          {:ok,
-           socket
-           |> put_flash(:error, "Failed to join room.")
-           |> redirect(to: "/")}
-      end
+    # Immediately reject if the room is missing
+    if not Rooms.room_exists?(room_id) do
+      {:ok, socket |> put_flash(:error, "Room does not exist.") |> redirect(to: "/")}
     else
-      # Initial stateless HTTP render before WebSocket upgrade
-      {:ok, assign(socket, room_id: room_id, session_token: token, current_user: username, room_state: nil)}
+
+      if connected?(socket) do
+        case Rooms.join_room(room_id, token, username_param) do
+          :ok ->
+            Phoenix.PubSub.subscribe(UnoGame.PubSub, "room:#{room_id}")
+            UnoGameWeb.Presence.track(self(), "presence:room:#{room_id}", token, %{})
+
+            room_state = Rooms.get_room_state(room_id)
+
+            # Safely retrieve the username from the state in case this is a reconnection
+            current_username = room_state.players[token].username
+
+            socket =
+              socket
+              |> assign(:room_id, room_id)
+              |> assign(:session_token, token)
+              |> assign(:current_user, current_username)
+              |> assign(:room_state, room_state)
+
+            {:ok, socket}
+
+          {:error, :room_full} ->
+            {:ok, socket |> put_flash(:error, "Room is full.") |> redirect(to: "/")}
+
+          {:error, _reason} ->
+            {:ok, socket |> put_flash(:error, "Failed to join room.") |> redirect(to: "/")}
+        end
+      else
+        {:ok, assign(socket, room_id: room_id, session_token: token, current_user: username_param, room_state: nil)}
+      end
     end
   end
 
