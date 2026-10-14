@@ -111,7 +111,8 @@ defmodule UnoGameWeb.HomeLive do
         {:noreply, assign(socket, :error, "Room does not exist. Please check the code.")}
 
       true ->
-        {:noreply, push_navigate(socket, to: "/room/#{formatted_id}")}
+        # Re-add the username as a query parameter so RoomLive can extract it
+        {:noreply, push_navigate(socket, to: "/room/#{formatted_id}?username=#{URI.encode(username)}")}
     end
   end
 

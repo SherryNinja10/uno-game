@@ -1,6 +1,7 @@
 defmodule UnoGame.RoomServer do
-  use GenServer
+  use GenServer, restart: :transient
 
+  require Logger
   alias UnoGame.RoomRegistry
 
   @max_players 7
@@ -205,5 +206,10 @@ defmodule UnoGame.RoomServer do
   def handle_info(:execute_gc, room_state) do
     # Returning :stop with :normal reason cleanly terminates the GenServer
     {:stop, :normal, room_state}
+  end
+
+  def terminate(reason, room_state) do
+    Logger.info("Room #{room_state.room_id} has been terminated. Reason: #{inspect(reason)}")
+    :ok
   end
 end
