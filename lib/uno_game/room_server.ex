@@ -106,7 +106,7 @@ defmodule UnoGame.RoomServer do
       # Case 3: New player joining
       true ->
         new_host = room_state.host || session_token
-        new_player = %{username: username, connection_status: :connected, hand: []}
+        new_player = %{username: username, connection_status: :connected, hand: [], called_uno: false}
         updated_players = Map.put(room_state.players, session_token, new_player)
 
         new_state = %{room_state | players: updated_players, host: new_host}
@@ -116,13 +116,12 @@ defmodule UnoGame.RoomServer do
   end
 
   def handle_call({:leave_room, session_token}, _from, room_state) do
-    # Remove the player from the map
+    # Remove the player from the map and turn order
     updated_players = Map.delete(room_state.players, session_token)
-
     updated_turn_order = List.delete(room_state.turn_order, session_token)
 
     if map_size(updated_players) == 0 do
-      # If the room is completely empty, terminate immediately without the 30s timer
+      # If the room is completely empty, terminate immediately
       new_state = %{room_state | players: updated_players, host: nil}
       {:stop, :normal, :ok, new_state}
     else
@@ -130,13 +129,14 @@ defmodule UnoGame.RoomServer do
       new_host =
         if room_state.host == session_token do
           case Map.keys(updated_players) do
-            [next_host_token | _] -> next_host_token # Pick the first available remaining token
+            [next_host_token | _] -> next_host_token
             _ -> nil
           end
         else
           room_state.host
         end
 
+      # Safely wrap the turn index
       new_index =
         if length(updated_turn_order) > 0 do
           rem(room_state.current_turn_index, length(updated_turn_order))
@@ -144,13 +144,28 @@ defmodule UnoGame.RoomServer do
           0
         end
 
+      # NEW: Check for forfeit victory if only one player remains during an active game
+      {final_status, final_players} =
+        if map_size(updated_players) == 1 and room_state.status == :playing do
+          Process.send_after(self(), :reset_to_lobby, 5000)
+
+          # Empty the remaining player's hand so the LiveView UI automatically detects them as the winner
+          [{last_token, last_player}] = Enum.to_list(updated_players)
+          winning_players = Map.put(updated_players, last_token, %{last_player | hand: []})
+
+          {:game_over, winning_players}
+        else
+          {room_state.status, updated_players}
+        end
+
       new_state = %{
         room_state |
-        players: updated_players,
+        players: final_players,
         turn_order: updated_turn_order,
         host: new_host,
-        current_turn_index: new_index
-      }
+        current_turn_index: new_index,
+        status: final_status
+      } |> reset_turn_timer()
 
       broadcast_state(new_state)
       {:reply, :ok, new_state}
@@ -184,7 +199,7 @@ defmodule UnoGame.RoomServer do
         discard_pile: [first_discard],
         current_turn_index: 0,
         play_direction: 1
-      }
+      } |> reset_turn_timer()
 
       broadcast_state(new_state)
       {:reply, :ok, new_state}
@@ -268,7 +283,7 @@ defmodule UnoGame.RoomServer do
             play_direction: new_direction,
             current_turn_index: new_index,
             status: new_status
-          }
+          } |> reset_turn_timer()
 
           broadcast_state(new_state)
           {:noreply, new_state}
@@ -305,7 +320,7 @@ defmodule UnoGame.RoomServer do
           deck: new_deck,
           discard_pile: new_discard,
           current_turn_index: new_index
-        }
+        } |> reset_turn_timer()
 
         broadcast_state(new_state)
         {:noreply, new_state}
@@ -317,13 +332,79 @@ defmodule UnoGame.RoomServer do
     end
   end
 
+  def handle_cast({:call_uno, session_token}, room_state) do
+    player = room_state.players[session_token]
+
+    if not is_nil(player) and length(player.hand) <= 2 do
+      updated_player = %{player | called_uno: true}
+      new_state = put_in(room_state.players[session_token], updated_player)
+
+      broadcast_state(new_state)
+      {:noreply, new_state}
+    else
+      {:noreply, room_state}
+    end
+  end
+
+  def handle_cast({:catch_uno, _catcher_token, target_token}, room_state) do
+    target = room_state.players[target_token]
+
+    if not is_nil(target) and length(target.hand) == 1 and not target.called_uno do
+      {new_deck, new_discard, drawn_cards} =
+        draw_n_cards(room_state.deck, room_state.discard_pile, 2)
+
+      updated_target = %{target | hand: target.hand ++ drawn_cards, called_uno: false}
+
+      new_state = %{
+        room_state |
+        deck: new_deck,
+        discard_pile: new_discard
+      }
+
+      new_state = put_in(new_state.players[target_token], updated_target)
+
+      broadcast_state(new_state)
+      {:noreply, new_state}
+    else
+      {:noreply, room_state}
+    end
+  end
+
   def handle_call(:get_state, _from, room_state) do
     {:reply, room_state, room_state}
   end
 
   def handle_info(:turn_timeout, room_state) do
-    # Logic to follow
-    {:noreply, room_state}
+    if room_state.status == :playing do
+      active_token = Enum.at(room_state.turn_order, room_state.current_turn_index)
+
+      # 1. Force the AFK player to draw 1 card
+      {new_deck, new_discard, drawn_cards} =
+        draw_n_cards(room_state.deck, room_state.discard_pile, 1)
+
+      current_player = room_state.players[active_token]
+      updated_player = %{current_player | hand: current_player.hand ++ drawn_cards}
+      updated_players = Map.put(room_state.players, active_token, updated_player)
+
+      # 2. Advance the turn index
+      player_count = length(room_state.turn_order)
+      raw_index = room_state.current_turn_index + room_state.play_direction
+      new_index = rem(raw_index + player_count, player_count)
+
+      # 3. Update state and restart the timer
+      new_state = %{
+        room_state |
+        players: updated_players,
+        deck: new_deck,
+        discard_pile: new_discard,
+        current_turn_index: new_index
+      } |> reset_turn_timer()
+
+      broadcast_state(new_state)
+      {:noreply, new_state}
+    else
+      {:noreply, %{room_state | turn_timer_ref: nil}}
+    end
   end
 
   def handle_info(%Phoenix.Socket.Broadcast{event: "presence_diff", payload: diff}, room_state) do
@@ -369,7 +450,7 @@ defmodule UnoGame.RoomServer do
     # Clear all hands for the next game
     reset_players =
       Enum.reduce(room_state.players, %{}, fn {token, player}, acc ->
-        Map.put(acc, token, %{player | hand: []})
+        Map.put(acc, token, %{player | hand: [], called_uno: false})
       end)
 
     new_state = %{
@@ -431,4 +512,25 @@ defmodule UnoGame.RoomServer do
 
   # Edge case fallback: Every single card is in players' hands, stop drawing
   defp draw_n_cards([], discard, _count, drawn), do: {[], discard, Enum.reverse(drawn)}
+
+  defp reset_turn_timer(room_state) do
+    if room_state.turn_timer_ref do
+      Process.cancel_timer(room_state.turn_timer_ref)
+    end
+
+    if room_state.status == :playing do
+      ref = Process.send_after(self(), :turn_timeout, 30_000)
+      %{room_state | turn_timer_ref: ref}
+    else
+      %{room_state | turn_timer_ref: nil}
+    end
+  end
+
+  def call_uno(room_id, session_token) do
+    GenServer.cast(via_tuple(room_id), {:call_uno, session_token})
+  end
+
+  def catch_uno(room_id, catcher_token, target_token) do
+    GenServer.cast(via_tuple(room_id), {:catch_uno, catcher_token, target_token})
+  end
 end

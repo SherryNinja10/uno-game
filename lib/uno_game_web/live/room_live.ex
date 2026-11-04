@@ -34,6 +34,8 @@ defmodule UnoGameWeb.RoomLive do
               |> assign(:current_user, current_username)
               |> assign(:room_state, room_state)
               |> assign(:pending_wild, nil)
+              |> assign(:time_remaining, 30)
+              |> assign(:timer_ref, nil)
 
             {:ok, socket}
 
@@ -44,7 +46,7 @@ defmodule UnoGameWeb.RoomLive do
             {:ok, socket |> put_flash(:error, "Failed to join room.") |> redirect(to: "/")}
         end
       else
-        {:ok, assign(socket, room_id: room_id, session_token: token, current_user: username_param, room_state: nil)}
+        {:ok, assign(socket, room_id: room_id, session_token: token, current_user: username_param, room_state: nil, time_remaining: 30, timer_ref: nil)}
       end
     end
   end
@@ -99,7 +101,6 @@ defmodule UnoGameWeb.RoomLive do
               </div>
             <% end %>
           </div>
-
         <% end %>
 
         <!-- GAME OVER STATE -->
@@ -128,10 +129,6 @@ defmodule UnoGameWeb.RoomLive do
           <% current_player = @room_state.players[@session_token] %>
           <% top_card = List.first(@room_state.discard_pile) %>
 
-          <!-- Turn Management Logic -->
-          <% active_token = Enum.at(@room_state.turn_order, @room_state.current_turn_index) %>
-          <% my_turn? = active_token == @session_token %>
-
           <!-- Extract opponents in seating order, skipping the current user -->
           <% opponents_in_order =
                @room_state.turn_order
@@ -139,25 +136,63 @@ defmodule UnoGameWeb.RoomLive do
                |> Enum.map(&{&1, @room_state.players[&1]})
           %>
 
+          <!-- Turn Management Logic -->
+          <% player_count = length(@room_state.turn_order) %>
+          <% current_idx = @room_state.current_turn_index %>
+          <% dir = @room_state.play_direction %>
+
+          <% active_token = Enum.at(@room_state.turn_order, current_idx) %>
+          <% my_turn? = active_token == @session_token %>
+
+          <!-- Determine Next and Previous indices using safe modulo math -->
+          <% next_idx = rem(current_idx + dir + player_count, player_count) %>
+          <% prev_idx = rem(current_idx - dir + player_count, player_count) %>
+
+          <% next_token = Enum.at(@room_state.turn_order, next_idx) %>
+          <% prev_token = Enum.at(@room_state.turn_order, prev_idx) %>
+
           <!-- Top: Opponents & Timer -->
           <div class="flex-none p-4 bg-white shadow flex items-center justify-between relative overflow-x-auto">
             <div class="flex-1 flex justify-center space-x-8 min-w-max">
               <%= for {opp_token, opponent} <- opponents_in_order do %>
                 <% is_active = opp_token == active_token %>
+                <% is_next = opp_token == next_token %>
+                <% is_prev = opp_token == prev_token %>
+
                 <div class={[
-                  "flex flex-col items-center p-2 rounded-lg transition-all duration-300 border-2",
+                  "flex flex-col items-center p-2 rounded-lg transition-all duration-300 border-2 relative",
                   is_active && "border-yellow-400 bg-yellow-50 scale-110 shadow-md",
-                  !is_active && "border-transparent hover:bg-gray-50"
+                  is_next && "border-blue-400 bg-blue-50",
+                  is_prev && "border-gray-300 opacity-75",
+                  !is_active && !is_next && !is_prev && "border-transparent hover:bg-gray-50"
                 ]}>
+
+                  <%= if is_next do %>
+                    <div class="absolute -top-3 bg-blue-500 text-white text-[10px] font-black px-2 py-0.5 rounded-full shadow-sm tracking-wider">NEXT</div>
+                  <% end %>
+                  <%= if is_prev do %>
+                    <div class="absolute -top-3 bg-gray-400 text-white text-[10px] font-black px-2 py-0.5 rounded-full shadow-sm tracking-wider">PREV</div>
+                  <% end %>
+
+                  <!-- Catch button overlay -->
+                  <%= if length(opponent.hand) == 1 and not Map.get(opponent, :called_uno, false) do %>
+                    <button phx-click="catch_uno" phx-value-target={opp_token} class="absolute -bottom-4 z-20 bg-red-600 hover:bg-red-500 text-white text-[11px] font-black px-3 py-1 rounded-full shadow-lg border border-white animate-bounce">
+                      CATCH!
+                    </button>
+                  <% end %>
+
                   <span class={[
                     "font-bold transition-colors",
                     is_active && "text-2xl text-yellow-700",
-                    !is_active && "text-xl text-gray-800"
+                    is_next && "text-xl text-blue-700",
+                    (!is_active && !is_next) && "text-xl text-gray-800"
                   ]}><%= opponent.username %></span>
+
                   <span class={[
                     "text-sm font-semibold px-3 py-1 rounded-full mt-1 transition-colors",
                     is_active && "text-yellow-800 bg-yellow-200",
-                    !is_active && "text-gray-500 bg-gray-200"
+                    is_next && "text-blue-800 bg-blue-200",
+                    (!is_active && !is_next) && "text-gray-500 bg-gray-200"
                   ]}>
                     <%= length(opponent.hand) %> Cards
                   </span>
@@ -168,14 +203,23 @@ defmodule UnoGameWeb.RoomLive do
             <!-- Timer -->
             <div class="absolute right-8 top-4 flex flex-col items-end">
               <span class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Time Remaining</span>
-              <div class="bg-gray-800 px-4 py-2 rounded shadow text-2xl font-mono font-bold text-red-500">
-                00:30
+              <div class={["px-4 py-2 rounded shadow text-2xl font-mono font-bold", @time_remaining <= 5 && "bg-red-900 text-red-400 animate-pulse", @time_remaining > 5 && "bg-gray-800 text-white"]}>
+                00:<%= String.pad_leading(Integer.to_string(@time_remaining), 2, "0") %>
               </div>
             </div>
           </div>
 
           <!-- Middle: Play Area (Draw & Discard) -->
           <div class="flex-grow flex items-center justify-center space-x-16 bg-green-800 shadow-inner relative">
+
+            <!-- Play Direction Indicator -->
+            <div class="absolute top-6 left-1/2 transform -translate-x-1/2 bg-black/40 border border-white/20 text-white/90 px-6 py-2 rounded-full text-sm font-black tracking-widest flex items-center shadow-lg">
+              <%= if @room_state.play_direction == 1 do %>
+                <span class="mr-2 animate-pulse">➡️</span> CLOCKWISE <span class="ml-2 animate-pulse">➡️</span>
+              <% else %>
+                <span class="mr-2 animate-pulse">⬅️</span> COUNTER-CLOCKWISE <span class="ml-2 animate-pulse">⬅️</span>
+              <% end %>
+            </div>
 
             <!-- Draw Pile -->
             <div class="flex flex-col items-center cursor-pointer hover:-translate-y-2 transition-transform" phx-click="draw_card">
@@ -220,10 +264,18 @@ defmodule UnoGameWeb.RoomLive do
             <div class="mb-4 w-full max-w-6xl flex justify-between items-end">
               <div class="text-2xl font-bold flex items-center space-x-3">
                 <span class="bg-indigo-600 px-4 py-1 rounded-full"><%= current_player.username %></span>
+
+                <!-- UNO Call Button -->
+                <%= if length(current_player.hand) <= 2 do %>
+                  <button phx-click="call_uno" disabled={Map.get(current_player, :called_uno, false)} class={["ml-4 px-4 py-1 rounded-full font-black tracking-widest text-sm border-2 transition-all", Map.get(current_player, :called_uno, false) && "bg-green-600 border-green-400 text-white opacity-50 cursor-not-allowed", not Map.get(current_player, :called_uno, false) && "bg-red-600 border-white text-white shadow-lg hover:scale-110 hover:bg-red-500 animate-pulse"]}>
+                    <%= if Map.get(current_player, :called_uno, false), do: "SAFE", else: "UNO!" %>
+                  </button>
+                <% end %>
+
                 <%= if my_turn? do %>
-                  <span class="text-yellow-400 text-lg animate-pulse">⭐ Your Turn</span>
+                  <span class="text-yellow-400 text-lg animate-pulse ml-4">⭐ Your Turn</span>
                 <% else %>
-                  <span class="text-gray-500 text-sm italic">Waiting for other players...</span>
+                  <span class="text-gray-500 text-sm italic ml-4">Waiting for other players...</span>
                 <% end %>
               </div>
 
@@ -275,7 +327,49 @@ defmodule UnoGameWeb.RoomLive do
 
   # Catches the PubSub broadcast from the GenServer
   def handle_info({:state_update, new_state}, socket) do
-    {:noreply, assign(socket, :room_state, new_state)}
+    old_state = socket.assigns.room_state
+    is_playing = new_state.status == :playing
+
+    turn_changed? =
+      old_state == nil or
+      old_state.current_turn_index != new_state.current_turn_index or
+      old_state.status != new_state.status
+
+    socket = assign(socket, :room_state, new_state)
+
+    socket =
+      if is_playing and turn_changed? do
+        if socket.assigns[:timer_ref], do: Process.cancel_timer(socket.assigns.timer_ref)
+        ref = Process.send_after(self(), :tick, 1000)
+
+        socket
+        |> assign(:time_remaining, 30)
+        |> assign(:timer_ref, ref)
+      else
+        # Stop ticking if the game ended
+        if not is_playing and socket.assigns[:timer_ref] do
+          Process.cancel_timer(socket.assigns.timer_ref)
+          socket |> assign(:timer_ref, nil) |> assign(:time_remaining, 30)
+        else
+          socket
+        end
+      end
+
+    {:noreply, socket}
+  end
+
+  # Local LiveView tick loop to update the UI every second
+  def handle_info(:tick, socket) do
+    time_remaining = max(0, socket.assigns.time_remaining - 1)
+
+    ref =
+      if time_remaining > 0 do
+        Process.send_after(self(), :tick, 1000)
+      else
+        nil
+      end
+
+    {:noreply, socket |> assign(:time_remaining, time_remaining) |> assign(:timer_ref, ref)}
   end
 
   def handle_event("leave_room", _params, socket) do
@@ -315,5 +409,15 @@ defmodule UnoGameWeb.RoomLive do
     Rooms.play_card(socket.assigns.room_id, socket.assigns.session_token, card)
 
     {:noreply, assign(socket, :pending_wild, nil)}
+  end
+
+  def handle_event("call_uno", _params, socket) do
+    Rooms.call_uno(socket.assigns.room_id, socket.assigns.session_token)
+    {:noreply, socket}
+  end
+
+  def handle_event("catch_uno", %{"target" => target_token}, socket) do
+    Rooms.catch_uno(socket.assigns.room_id, socket.assigns.session_token, target_token)
+    {:noreply, socket}
   end
 end

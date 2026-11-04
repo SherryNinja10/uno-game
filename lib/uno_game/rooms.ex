@@ -73,6 +73,14 @@ defmodule UnoGame.Rooms do
     RoomServer.draw_card(room_id, session_token)
   end
 
+  def call_uno(room_id, session_token) do
+    RoomServer.call_uno(room_id, session_token)
+  end
+
+  def catch_uno(room_id, catcher_token, target_token) do
+    RoomServer.catch_uno(room_id, catcher_token, target_token)
+  end
+
   # Generates a fast, URL-safe 6-character string using Erlang's crypto module
   defp generate_nano_id do
     :crypto.strong_rand_bytes(5)
